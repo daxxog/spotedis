@@ -103,8 +103,9 @@ void spotify_debug() {
     }
     log("\n");
     log("g_appkey_size: %d\n", (int)g_appkey_size);
-    log("USER_AGENT: %s\n", USER_AGENT);
     log("g_username: %s\n", g_username);
+    log("USER_AGENT: %s\n", USER_AGENT);
+    log("SPOTIFY_API_VERSION: %d\n", SPOTIFY_API_VERSION);
 
     log("\x1b[0m");
 }
@@ -124,6 +125,7 @@ static void connection_error(sp_session *session, sp_error error) {
 
 static void logged_in(sp_session *session, sp_error error) {
     dbg("logged_in");
+    sp_session_set_private_session(session, 1);
     sp_session_logout(session);
 }
 
