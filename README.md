@@ -1,0 +1,4 @@
+spotedis
+========
+
+libspotify + highredis = spotedis
