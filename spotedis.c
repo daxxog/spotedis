@@ -9,7 +9,7 @@
 
 #include "spotify_appkey.h"
 #include "spotify_login.h"
-#include "example.h"
+#include "spotedis.h"
 
 int main(int argc, char **argv) {
     unsigned int j;
