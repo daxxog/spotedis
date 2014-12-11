@@ -1,7 +1,4 @@
 spotedis
-spotify_appkey.key
-spotify_login.json
-appkey.c
 spotify_appkey.c
 spotify_login.c
-tmp
+cache

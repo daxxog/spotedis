@@ -13,17 +13,15 @@
 
 int main(int argc, char **argv) {
     unsigned int j;
-    redisContext *c;
-    redisReply *reply;
     const char *hostname = (argc > 1) ? argv[1] : "127.0.0.1";
     int port = (argc > 2) ? atoi(argv[2]) : 6379;
 
     struct timeval timeout = { 1, 500000 }; // 1.5 seconds
-    c = redisConnectWithTimeout(hostname, port, timeout);
-    if (c == NULL || c->err) {
-        if (c) {
-            printf("Connection error: %s\n", c->errstr);
-            redisFree(c);
+    g_context = redisConnectWithTimeout(hostname, port, timeout);
+    if(g_context == NULL || g_context->err) {
+        if(g_context) {
+            printf("Connection error: %s\n", g_context->errstr);
+            redisFree(g_context);
         } else {
             printf("Connection error: can't allocate redis context\n");
         }
@@ -40,61 +38,176 @@ int main(int argc, char **argv) {
     log("END SPOTIFY\x1b[0m\n\n");
     /* END SPOTIFY */
 
-    /* PING server */
-    reply = redisCommand(c,"PING");
-    printf("PING: %s\n", reply->str);
-    freeReplyObject(reply);
-
-    /* Set a key */
-    reply = redisCommand(c,"SET %s %s", "foo", "hello world");
-    printf("SET: %s\n", reply->str);
-    freeReplyObject(reply);
-
-    /* Set a key using binary safe API */
-    reply = redisCommand(c,"SET %b %b", "bar", (size_t) 3, "hello", (size_t) 5);
-    printf("SET (binary API): %s\n", reply->str);
-    freeReplyObject(reply);
-
-    /* Try a GET and two INCR */
-    reply = redisCommand(c,"GET foo");
-    printf("GET foo: %s\n", reply->str);
-    freeReplyObject(reply);
-
-    reply = redisCommand(c,"INCR counter");
-    printf("INCR counter: %lld\n", reply->integer);
-    freeReplyObject(reply);
-    /* again ... */
-    reply = redisCommand(c,"INCR counter");
-    printf("INCR counter: %lld\n", reply->integer);
-    freeReplyObject(reply);
-
-    /* Create a list of numbers, from 0 to 9 */
-    reply = redisCommand(c,"DEL mylist");
-    freeReplyObject(reply);
-    for (j = 0; j < 10; j++) {
-        char buf[64];
-
-        snprintf(buf,64,"%d",j);
-        reply = redisCommand(c,"LPUSH mylist element-%s", buf);
-        freeReplyObject(reply);
-    }
-
-    /* Let"s check what we have inside the list */
-    reply = redisCommand(c,"LRANGE mylist 0 -1");
-    if (reply->type == REDIS_REPLY_ARRAY) {
-        for (j = 0; j < reply->elements; j++) {
-            printf("%u) %s\n", j, reply->element[j]->str);
-        }
-    }
-    freeReplyObject(reply);
-
-    /* Disconnects and frees the context */
-    redisFree(c);
+    //disconnect
+    redisFree(g_context);
 
     return 0;
 }
 
+void dbg(const char* fx) {
+    log("\x1b[35m%s();\x1b[0m\n", fx);
+}
+
+/* START CUSTOM CALLBACKS */
+static void grab_track() {
+    dbg("grab_track");
+    reset_md();
+    g_reply = redisCommand(g_context, "BLPOP %s %d", REDIS_LIST, 0);
+    if(g_reply->type == REDIS_REPLY_ARRAY) {
+        if(strcmp(g_reply->element[0]->str, REDIS_LIST) == 0) {
+            if(!is_playing) {
+                play_track(g_reply->element[1]->str);
+            }
+        }
+    }
+    freeReplyObject(g_reply);
+}
+
+static void play_track(const char *uri) {
+    dbg("play_track");
+    if((int)strlen(uri) < URI_MAX_SIZE) {
+        strcpy(g_uri, uri);
+        g_link = sp_link_create_from_string(g_uri);
+        if(sp_link_type(g_link) == SP_LINKTYPE_TRACK){
+            if(!is_playing) {
+                notify_player_load = 1;
+            }
+        }
+    } 
+}
+
+static void player_load(sp_session *session) {
+    dbg("player_load");
+    notify_player_load = 0;
+    is_playing = 1;
+    sp_session_player_load(session, sp_link_as_track(g_link));
+    sp_session_player_play(session, 1);
+}
+
+static void reset_md() {
+    dbg("reset_md");
+    md_flag = 0;
+    md_try = 0;
+}
+/* END CUSTOM CALLBACKS */
+
+
+/* START CALLBACKS */
+static void logged_in(sp_session *session, sp_error error) {
+    dbg("logged_in");
+    sp_session_set_private_session(session, 1);
+    sp_session_preferred_bitrate(session, SP_BITRATE_320k);
+    sp_session_preferred_offline_bitrate(session, SP_BITRATE_320k, 1);
+
+    grab_track();
+
+    //sp_session_logout(session);
+}
+
+static void logged_out(sp_session *session) {
+    dbg("logged_out");
+    notify_logout = 1;
+    notify_main_thread(session);
+}
+
+static void metadata_updated(sp_session *session) {
+    dbg("metadata_updated");
+
+    if(notify_player_load) {
+        player_load(session);
+    }
+}
+
+static void connection_error(sp_session *session, sp_error error) {
+    dbg("connection_error");
+}
+
+static void message_to_user(sp_session *session, const char *message) {
+    fprintf(stderr,"\x1b[36m%s\x1b[0m", message);
+}
+
+void notify_main_thread(sp_session *session) {
+    dbg("notify_main_thread");
+    if(md_flag == 0) {
+        md_try++;
+        if(md_try > 15) {
+            reset_md();
+            player_load(session);
+        }
+    }
+    pthread_mutex_lock(&notify_mutex);
+    notify_events = 1;
+    pthread_cond_signal(&notify_cond);
+    pthread_mutex_unlock(&notify_mutex);
+}
+
+static int music_delivery(sp_session *session, const sp_audioformat *format, const void *frames, int num_frames) {
+    dbg("music_delivery");
+
+    md_flag = 1;
+    g_reply = redisCommand(g_context, "PUBLISH %s:data %s", g_uri, frames);
+    freeReplyObject(g_reply);
+
+    return num_frames;
+}
+
+static void play_token_lost(sp_session *session) {
+    dbg("play_token_lost");
+}
+
+static void log_message(sp_session *session, const char *data) {
+    fprintf(stderr,"\x1b[36m%s\x1b[0m", data);
+}
+
+static void end_of_track(sp_session *session) {
+    dbg("end_of_track");
+    is_playing = 0;
+    g_reply = redisCommand(g_context, "PUBLISH %s:end 1", g_uri);
+    freeReplyObject(g_reply);
+    grab_track();
+}
+
+static void streaming_error(sp_session *session, sp_error error) {
+    dbg("streaming_error");
+}
+
+static void userinfo_updated(sp_session *session) {
+    dbg("userinfo_updated");
+}
+
+static void start_playback(sp_session *session) {
+    dbg("start_playback");
+}
+
+static void stop_playback(sp_session *session) {
+    dbg("stop_playback");
+}
+
+static void get_audio_buffer_stats(sp_session *session, sp_audio_buffer_stats *stats) {
+    //dbg("get_audio_buffer_stats");
+}
+
+static void offline_status_updated(sp_session *session) {
+    dbg("offline_status_updated");
+}
+
+static void offline_error(sp_session *session, sp_error error) {
+    dbg("offline_error");
+}
+
+static void credentials_blob_updated(sp_session *session, const char *blob) {
+    dbg("credentials_blob_updated");
+}
+/* END CALLBACKS */
+
+void spotify() {
+    dbg("spotify");
+    spotify_debug();
+    spotify_main();
+}
+
 void spotify_debug() {
+    dbg("spotify_debug");
     log("\x1b[33m");
 
     log("g_appkey: ");
@@ -108,102 +221,6 @@ void spotify_debug() {
     log("SPOTIFY_API_VERSION: %d\n", SPOTIFY_API_VERSION);
 
     log("\x1b[0m");
-}
-
-void spotify() {
-    spotify_debug();
-    spotify_main();
-}
-
-void dbg(const char* fx) {
-    log("\x1b[35m%s();\x1b[0m\n", fx);
-}
-
-static void connection_error(sp_session *session, sp_error error) {
-    dbg("connection_error");
-}
-
-static void logged_in(sp_session *session, sp_error error) {
-    dbg("logged_in");
-    sp_session_set_private_session(session, 1);
-    sp_session_logout(session);
-}
-
-static void logged_out(sp_session *session) {
-    dbg("logged_out");
-    notify_logout = 1;
-    notify_main_thread(session);
-}
-
-static void log_message(sp_session *session, const char *data) {
-    fprintf(stderr,"\x1b[36m%s\x1b[0m",data);
-}
-
-void notify_main_thread(sp_session *session) {
-    dbg("notify_main_thread");
-    pthread_mutex_lock(&notify_mutex);
-    notify_events = 1;
-    pthread_cond_signal(&notify_cond);
-    pthread_mutex_unlock(&notify_mutex);
-}
-
-int spotify_init(const char *username,const char *password) {
-    dbg("spotify_init");
-    sp_session_config config;
-    sp_error error;
-    sp_session *session;
-    
-    /// The application key is specific to each project, and allows Spotify
-    /// to produce statistics on how our service is used.
-    //extern const char g_appkey[];
-    /// The size of the application key.
-    //extern const size_t g_appkey_size;
-
-    // Always do this. It allows libspotify to check for
-    // header/library inconsistencies.
-    config.api_version = SPOTIFY_API_VERSION;
-
-    // The path of the directory to store the cache. This must be specified.
-    // Please read the documentation on preferred values.
-    config.cache_location = "tmp";
-
-    // The path of the directory to store the settings. 
-    // This must be specified.
-    // Please read the documentation on preferred values.
-    config.settings_location = "tmp";
-
-    // The key of the application. They are generated by Spotify,
-    // and are specific to each application using libspotify.
-    config.application_key = g_appkey;
-    config.application_key_size = g_appkey_size;
-
-    // This identifies the application using some
-    // free-text string [1, 255] characters.
-    config.user_agent = USER_AGENT;
-
-    // Register the callbacks.
-    config.callbacks = &callbacks;
-
-    log(""); //prevents SEGFAULT ??
-
-    error = sp_session_create(&config, &session);
-    if (SP_ERROR_OK != error) {
-        fprintf(stderr, "failed to create session: %s\n",
-                        sp_error_message(error));
-        return 2;
-    }
-
-    // Login using the credentials given on the command line.
-    error = sp_session_login(session, username, password, 0, g_blob);
-
-    if (SP_ERROR_OK != error) {
-        fprintf(stderr, "failed to login: %s\n",
-                        sp_error_message(error));
-        return 3;
-    }
-
-    g_session = session;
-    return 0;
 }
 
 int spotify_main() {
@@ -257,5 +274,62 @@ int spotify_main() {
 
         pthread_mutex_lock(&notify_mutex);
     }
+    return 0;
+}
+
+int spotify_init(const char *username,const char *password) {
+    dbg("spotify_init");
+    sp_session_config config;
+    sp_error error;
+    sp_session *session;
+    
+    /// The application key is specific to each project, and allows Spotify
+    /// to produce statistics on how our service is used.
+    //extern const char g_appkey[];
+    /// The size of the application key.
+    //extern const size_t g_appkey_size;
+
+    // Always do this. It allows libspotify to check for
+    // header/library inconsistencies.
+    config.api_version = SPOTIFY_API_VERSION;
+
+    // The path of the directory to store the cache. This must be specified.
+    // Please read the documentation on preferred values.
+    config.cache_location = CACHE_LOCATION;
+
+    // The path of the directory to store the settings. 
+    // This must be specified.
+    // Please read the documentation on preferred values.
+    config.settings_location = CACHE_LOCATION;
+
+    // The key of the application. They are generated by Spotify,
+    // and are specific to each application using libspotify.
+    config.application_key = g_appkey;
+    config.application_key_size = g_appkey_size;
+
+    // This identifies the application using some
+    // free-text string [1, 255] characters.
+    config.user_agent = USER_AGENT;
+
+    // Register the callbacks.
+    config.callbacks = &callbacks;
+
+    error = sp_session_create(&config, &session);
+    if (SP_ERROR_OK != error) {
+        fprintf(stderr, "failed to create session: %s\n",
+                        sp_error_message(error));
+        return 2;
+    }
+
+    // Login using the credentials given on the command line.
+    error = sp_session_login(session, username, password, 0, g_blob);
+
+    if (SP_ERROR_OK != error) {
+        fprintf(stderr, "failed to login: %s\n",
+                        sp_error_message(error));
+        return 3;
+    }
+
+    g_session = session;
     return 0;
 }
