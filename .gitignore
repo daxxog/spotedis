@@ -2,3 +2,5 @@ spotedis
 spotify_appkey.c
 spotify_login.c
 cache
+*.mp3
+*.pcm

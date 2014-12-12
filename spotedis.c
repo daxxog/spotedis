@@ -57,6 +57,7 @@ static void grab_track() {
         if(strcmp(g_reply->element[0]->str, REDIS_LIST) == 0) {
             if(!is_playing) {
                 play_track(g_reply->element[1]->str);
+                notify_main_thread(g_session);
             }
         }
     }
@@ -68,6 +69,7 @@ static void play_track(const char *uri) {
     if((int)strlen(uri) < URI_MAX_SIZE) {
         strcpy(g_uri, uri);
         g_link = sp_link_create_from_string(g_uri);
+        g_uri_set = 1;
         if(sp_link_type(g_link) == SP_LINKTYPE_TRACK){
             if(!is_playing) {
                 notify_player_load = 1;
@@ -77,17 +79,38 @@ static void play_track(const char *uri) {
 }
 
 static void player_load(sp_session *session) {
+    int sspl = -1;
+    int sspp = -1;
+
     dbg("player_load");
-    notify_player_load = 0;
     is_playing = 1;
-    sp_session_player_load(session, sp_link_as_track(g_link));
-    sp_session_player_play(session, 1);
+
+    if(g_sspl != SP_ERROR_IS_LOADING) {
+        //dbg("sp_session_player_load");
+        sspl = (int)sp_session_player_load(session, sp_link_as_track(g_link));
+        //dbg("sp_session_player_play");
+        sspp = (int)sp_session_player_play(session, 1);
+        //dbg("continue");
+    }
+
+    if((sspl == SP_ERROR_OK) && (sspp == SP_ERROR_OK)) {
+        notify_player_load = 0;
+        log("notify_player_load:%d\n", notify_player_load);
+    } else {
+        if(g_sspl == -1) {
+            g_sspl = sspl;
+        }
+
+        log("sspl:%d\n", sspl);
+        log("sspp:%d\n", sspp);
+        log("g_sspl:%d\n", g_sspl);
+    }
 }
 
 static void reset_md() {
     dbg("reset_md");
     md_flag = 0;
-    md_try = 0;
+    md_sent_format = 0;
 }
 /* END CUSTOM CALLBACKS */
 
@@ -112,8 +135,7 @@ static void logged_out(sp_session *session) {
 
 static void metadata_updated(sp_session *session) {
     dbg("metadata_updated");
-
-    if(notify_player_load) {
+    if(!md_flag && g_uri_set && notify_player_load) {
         player_load(session);
     }
 }
@@ -128,13 +150,9 @@ static void message_to_user(sp_session *session, const char *message) {
 
 void notify_main_thread(sp_session *session) {
     dbg("notify_main_thread");
-    if(md_flag == 0) {
-        md_try++;
-        if(md_try > 15) {
-            reset_md();
-            player_load(session);
-        }
-    }
+
+    g_sspl = -1;
+
     pthread_mutex_lock(&notify_mutex);
     notify_events = 1;
     pthread_cond_signal(&notify_cond);
@@ -142,10 +160,28 @@ void notify_main_thread(sp_session *session) {
 }
 
 static int music_delivery(sp_session *session, const sp_audioformat *format, const void *frames, int num_frames) {
+    size_t frames_size;
+
     dbg("music_delivery");
 
-    md_flag = 1;
-    g_reply = redisCommand(g_context, "PUBLISH %s:data %s", g_uri, frames);
+    frames_size = num_frames * sizeof(int16_t) * format->channels;
+
+    log("sample_rate:%d\n", format->sample_rate);
+    log("channels:%d\n", format->channels);
+    log("num_frames:%d\n", num_frames);
+    log("frames_size:%d\n", (int)frames_size);
+
+    if(is_playing) {
+        md_flag = 1;
+
+        if(!md_sent_format) {
+            md_sent_format = 1;
+            g_reply = redisCommand(g_context, "PUBLISH %s:format %d_%d_%d_%d", g_uri, format->sample_rate, format->channels, num_frames, (int)frames_size);
+            freeReplyObject(g_reply);
+        }
+    }
+
+    g_reply = redisCommand(g_context, "PUBLISH %s:data %b", g_uri, frames, frames_size);
     freeReplyObject(g_reply);
 
     return num_frames;
@@ -162,6 +198,8 @@ static void log_message(sp_session *session, const char *data) {
 static void end_of_track(sp_session *session) {
     dbg("end_of_track");
     is_playing = 0;
+    g_uri_set = 0;
+    sp_session_player_unload(session);
     g_reply = redisCommand(g_context, "PUBLISH %s:end 1", g_uri);
     freeReplyObject(g_reply);
     grab_track();
@@ -173,6 +211,9 @@ static void streaming_error(sp_session *session, sp_error error) {
 
 static void userinfo_updated(sp_session *session) {
     dbg("userinfo_updated");
+    if(!md_flag && g_uri_set && notify_player_load) {
+        player_load(session);
+    }
 }
 
 static void start_playback(sp_session *session) {

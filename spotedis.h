@@ -60,10 +60,12 @@ redisContext *g_context;
 redisReply *g_reply;
 
 static char g_uri[URI_MAX_SIZE];
+static bool g_uri_set = 0;
 static bool notify_player_load = 0;
 static bool is_playing = 0;
 static bool md_flag = 0;
-static int md_try = 0;
+static bool md_sent_format = 0;
+static int g_sspl = -1;
 static int notify_events;
 static pthread_mutex_t notify_mutex;
 static pthread_cond_t notify_cond;
