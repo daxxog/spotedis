@@ -4,3 +4,4 @@ spotify_login.c
 cache
 *.mp3
 *.pcm
+*.flac
