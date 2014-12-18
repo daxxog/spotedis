@@ -202,7 +202,8 @@ static void end_of_track(sp_session *session) {
     sp_session_player_unload(session);
     g_reply = redisCommand(g_context, "PUBLISH %s:end 1", g_uri);
     freeReplyObject(g_reply);
-    grab_track();
+    exit(0); //HACK: loop in bash
+    //grab_track();
 }
 
 static void streaming_error(sp_session *session, sp_error error) {
